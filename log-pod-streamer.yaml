@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: Pod
-metadata:
-  name: log-streamer
-  namespace: ide
-spec:
-  containers:
-  - name: log-streamer
-    image: log-streamer:latest
