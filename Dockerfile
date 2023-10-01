@@ -11,13 +11,15 @@ COPY . .
 RUN go mod download
 
 # Build the Go app to a static binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o log-streamer .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o oom-fetch .
 
 # Final stage
 FROM alpine:latest
 
 # Copy the binary from the builder stage
-COPY --from=builder /go/src/app/log-streamer /usr/local/bin/log-streamer
+COPY --from=builder /go/src/app/oom-fetch /usr/local/bin/oom-fetch
 
 # Set the binary as the default command to run
-ENTRYPOINT ["/usr/local/bin/log-streamer"]
+ENTRYPOINT ["/usr/local/bin/oom-fetch"]
+
+# マルチステージビルドしよう。

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-fetch
+  namespace: ide
+spec:
+  containers:
+  - name: oom-fetch
+    image: oom-fetch:latest
+    imagePullPolicy: IfNotPresent  # Add this line

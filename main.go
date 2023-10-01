@@ -1,88 +1,81 @@
 package main
 
 import (
-	"bufio"
-	"context"
-	"fmt"
 	"log"
-	"sync"
-	"time"
+	"os"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 )
 
-func streamLogs(ctx context.Context, clientset *kubernetes.Clientset, namespace, podName string) {
-	// Exclude the log-streamer pod itself to prevent a log loop
-	if podName == "log-streamer" {
-		return
-	}
+func main() {
+	stopCh := make(chan struct{})
+	defer close(stopCh)
 
-	podLogOpts := v1.PodLogOptions{
-		Follow: true,
-	}
-	req := clientset.CoreV1().Pods(namespace).GetLogs(podName, &podLogOpts)
-	podLogs, err := req.Stream(ctx)
+	// Open the file for logging
+	file, err := os.OpenFile("out.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		log.Println(err)
-		return
+		log.Fatalf("Failed to open log file: %v", err)
 	}
-	defer podLogs.Close()
+	defer file.Close()
 
-	scanner := bufio.NewScanner(podLogs)
-	for scanner.Scan() {
-		logLine := scanner.Text()
-		fmt.Printf("log from pod %s: %s\n", podName, logLine)
-	}
+	// Set the log output to the file
+	log.SetOutput(file)
+
+	clientset := createClientSet()
+	controller := createController(clientset, stopCh)
+
+	go controller.Run(stopCh)
+	select {} // Block forever
 }
 
-func fetchPods(ctx context.Context, namespace string) ([]v1.Pod, *kubernetes.Clientset, error) {
+func createClientSet() *kubernetes.Clientset {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		log.Println("Error reading config:", err)
-		return nil, nil, err
+		log.Fatalf("Error creating config: %v", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Println("Error creating clientset:", err)
-		return nil, nil, err
+		log.Fatalf("Error creating clientset: %v", err)
 	}
 
-	podList, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		log.Println("Error fetching pods:", err)
-		return nil, nil, err
-	}
-	pods := append([]v1.Pod{}, podList.Items...)
-	return pods, clientset, err
+	return clientset
 }
 
-func main() {
-	namespace := "ide"
-	ctx := context.Background()
+func createController(clientset *kubernetes.Clientset, stopCh chan struct{}) cache.Controller {
+	watchlist := cache.NewListWatchFromClient(
+		clientset.CoreV1().RESTClient(),
+		"pods",
+		v1.NamespaceAll,
+		fields.Everything(),
+	)
 
-	for {
-		pods, clientset, err := fetchPods(ctx, namespace)
-		if err != nil {
-			log.Println("Error fetching pods:", err)
-			time.Sleep(10 * time.Second)
-			continue
-		}
+	_, controller := cache.NewInformer(
+		watchlist,
+		&v1.Pod{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				log.Println("Pod added")
+			},
+			DeleteFunc: func(obj interface{}) {
+				log.Println("Pod deleted")
+			},
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				pod := newObj.(*v1.Pod)
+				log.Printf("Pod updated: %s", pod.Name)
+				for _, containerStatus := range pod.Status.ContainerStatuses {
+					if containerStatus.LastTerminationState.Terminated != nil && containerStatus.LastTerminationState.Terminated.Reason == "OOMKilled" {
+						log.Printf("Pod %s in namespace %s was OOMKilled", pod.Name, pod.Namespace)
+					}
+				}
+			},
+		},
+	)
 
-		var wg sync.WaitGroup
-		for _, pod := range pods {
-			wg.Add(1)
-			go func(pod v1.Pod) {
-				defer wg.Done()
-				streamLogs(ctx, clientset, namespace, pod.Name)
-			}(pod)
-		}
-
-		wg.Wait()
-		log.Println("All log streaming goroutines completed, restarting in 10 seconds...")
-		time.Sleep(10 * time.Second)
-	}
+	return controller
 }
